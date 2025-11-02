@@ -1,136 +1,79 @@
 import streamlit as st
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+import cv2
+from PIL import Image
+import sudoku  # make sure sudoku.py is available in the same directory
 
 # -----------------------------
-# Backtracking Sudoku Solver
+# Helper functions
 # -----------------------------
-def is_valid(board, row, col, num):
-    for i in range(9):
-        if board[row][i] == num or board[i][col] == num:
-            return False
-    start_row, start_col = 3*(row//3), 3*(col//3)
-    for i in range(3):
-        for j in range(3):
-            if board[start_row+i][start_col+j] == num:
-                return False
-    return True
 
-def solve_sudoku(board):
+def preprocess_image(cell_image: np.ndarray):
+    """Preprocess a single cell image for model prediction."""
+    image_resized = cv2.resize(cell_image, (28, 28), interpolation=cv2.INTER_AREA)
+    image_float = image_resized.astype(np.float32) / 255.0
+    image_normalized = (image_float - 0.5) / 0.5
+    return image_normalized.reshape(1, 1, 28, 28)
+
+def predict(cell_image: np.ndarray, onnx_model_path: str) -> int:
+    """Predicts the digit in a cell using ONNX model."""
+    classes = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    image_input = preprocess_image(cell_image)
+    net = cv2.dnn.readNetFromONNX(onnx_model_path)
+    net.setInput(image_input)
+    output = net.forward()
+    predicted_class = np.argmax(output, axis=1)[0]
+    return classes[predicted_class]
+
+def recognize_digits_onnx(grid_image: np.ndarray, onnx_model_path: str) -> np.ndarray:
+    """Recognize digits in Sudoku grid image."""
+    arr = np.zeros((9, 9), dtype=np.uint8)
+    cells = sudoku.extract_cells(grid_image)
     for row in range(9):
         for col in range(9):
-            if board[row][col] == 0:
-                for num in range(1,10):
-                    if is_valid(board,row,col,num):
-                        board[row][col] = num
-                        if solve_sudoku(board):
-                            return True
-                        board[row][col] = 0
-                return False
-    return True
+            cell = cells[row, col]
+            if not sudoku.is_empty_cell(cell):
+                arr[row, col] = predict(cell, onnx_model_path)
+    return arr
 
-# -----------------------------
-# Draw Sudoku grid as image
-# -----------------------------
-def draw_sudoku_image(board):
-    cell_size = 50
-    grid_size = 9*cell_size
-    img = Image.new("RGB", (grid_size, grid_size), color="white")
-    draw = ImageDraw.Draw(img)
-    
-    # Load a font
-    try:
-        font = ImageFont.truetype("arial.ttf", 30)
-    except:
-        font = ImageFont.load_default()
-    
-    # Draw numbers
-    for i in range(9):
-        for j in range(9):
-            if board[i][j] != 0:
-                x = j*cell_size + 15
-                y = i*cell_size + 10
-                draw.text((x,y), str(board[i][j]), fill="black", font=font)
-    
-    # Draw grid lines
-    for i in range(10):
-        width = 3 if i%3==0 else 1
-        # Horizontal
-        draw.line([(0,i*cell_size),(grid_size,i*cell_size)], fill="black", width=width)
-        # Vertical
-        draw.line([(i*cell_size,0),(i*cell_size,grid_size)], fill="black", width=width)
-    
-    return img
+def sudoku_solver(sudoku_image: np.ndarray):
+    """Extract, recognize, solve, and display Sudoku solution."""
+    sudoku_grid = sudoku.extract_grid(sudoku_image, size=9 * 50)
+    if sudoku_grid is not None:
+        puzzle = recognize_digits_onnx(sudoku_grid, 'digits.onnx')
+        puzzle_copy = puzzle.copy()
+        if sudoku.solve(puzzle):
+            solution = sudoku.get_solution(puzzle_copy, puzzle)
+            sudoku.draw_solution(sudoku_grid, solution, (0, 0, 255))
+            sudoku_grid = cv2.cvtColor(sudoku_grid, cv2.COLOR_BGR2RGB)
+            return Image.fromarray(sudoku_grid), "✅ Puzzle Solved!"
+        else:
+            return Image.new("RGB", (450, 450), color="red"), "❌ Puzzle is unsolvable!"
+    else:
+        return Image.new("RGB", (450, 450), color="gray"), "⚠️ Can't extract Sudoku grid!"
 
 # -----------------------------
 # Streamlit UI
 # -----------------------------
-st.set_page_config(page_title="🧩 Sudoku Solver", layout="centered")
-st.title("🧩 Sudoku Solver — Manual Input")
-st.write("Type digits into the grid. Leave blank for empty cells.")
 
-# -----------------------------
-# Generate CSS Sudoku Grid
-# -----------------------------
-grid_html = """
-<style>
-.sudoku-grid {
-  display: grid;
-  grid-template-columns: repeat(9, 40px);
-  grid-template-rows: repeat(9, 40px);
-  gap: 1px;
-  margin: 10px 0;
-}
-.sudoku-grid input {
-  width: 40px;
-  height: 40px;
-  text-align: center;
-  font-size: 20px;
-  border: 1px solid #555;
-  outline: none;
-}
-.sudoku-grid input:focus {
-  border: 2px solid #007BFF;
-}
-.sudoku-grid input:nth-child(3n) {
-  border-right: 2px solid #000;
-}
-.sudoku-grid input:nth-child(n+19):nth-child(-n+27),
-.sudoku-grid input:nth-child(n+46):nth-child(-n+54),
-.sudoku-grid input:nth-child(n+73):nth-child(-n+81) {
-  border-bottom: 2px solid #000;
-}
-</style>
-<div class="sudoku-grid">
-"""
+st.set_page_config(page_title="Sudoku Solver From Image", layout="centered")
 
-# Create input boxes
-for i in range(9):
-    for j in range(9):
-        grid_html += f'<input type="text" id="cell_{i}_{j}" maxlength="1" />'
-grid_html += "</div>"
+st.title("Sudoku Solver From Image")
+st.write("Upload a Sudoku puzzle image to automatically extract, recognize, and solve it!")
 
-# Display grid
-st.components.v1.html(grid_html, height=400)
+uploaded_file = st.file_uploader("Upload Sudoku Image", type=["jpg", "jpeg", "png"])
 
-# -----------------------------
-# Hidden Text Inputs for Python
-# -----------------------------
-st.write("Alternatively, you can fill numbers here for Python to read:")
-board_input = []
-for i in range(9):
-    row_input = st.text_input(f"Row {i+1}", value="0 0 0 0 0 0 0 0 0")
-    board_input.append([int(x) if x.isdigit() else 0 for x in row_input.strip().split()[:9]])
+if uploaded_file is not None:
+    sudoku_image = np.array(Image.open(uploaded_file).convert("RGB"))
+    st.image(sudoku_image, caption="Uploaded Sudoku", use_container_width=True)
 
-# -----------------------------
-# Solve Button
-# -----------------------------
-if st.button("🧠 Solve Sudoku"):
-    board = np.array(board_input)
-    puzzle = board.copy()
-    if solve_sudoku(puzzle):
-        st.success("✅ Sudoku Solved!")
-        img = draw_sudoku_image(puzzle)
-        st.image(img, use_column_width=False)
-    else:
-        st.error("❌ This Sudoku puzzle is unsolvable!")
+    if st.button("Solve Puzzle"):
+        with st.spinner("Solving... Please wait."):
+            try:
+                solved_img, message = sudoku_solver(sudoku_image)
+                st.image(solved_img, caption="Solved Sudoku", use_container_width=True)
+                st.success(message)
+            except Exception as e:
+                st.error(f"Error: {e}")
+else:
+    st.info("👆 Please upload a Sudoku image to get started.")
